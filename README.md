@@ -1,7 +1,7 @@
 # Order Management REST API
 
 ## Overview
-A Spring Boot REST API for managing order lifecycles and inventory reservations. The application supports placing orders with stock decrements and price snapshotting, fetching order details, paginated order listing, status transitions, and order cancellation with stock restoration. Optimistic locking (@Version) detects conflicting concurrent updates. In the tested scenarios it prevented overselling and lost updates.
+A Spring Boot REST API for managing order lifecycles and inventory reservations. The application supports placing orders with stock decrements and price snapshotting, fetching order details, paginated order listing, status transitions, and order cancellation with stock restoration. Stock is protected by an atomic conditional UPDATE, and @Version on Order protects status changes and cancels.
 
 ---
 
@@ -47,35 +47,7 @@ export DB_USERNAME="<your-db-username>"
 export DB_PASSWORD="<your-db-password>"
 ```
 
-### 3. Start the App Once (Creates Schema)
-Start the application once so Hibernate inspects the entity models and creates the tables in `order_db` (`spring.jpa.hibernate.ddl-auto=update`):
-
-**PowerShell (Windows):**
-```powershell
-mvn spring-boot:run
-```
-*(Wait until `Started OrdersApplication` appears in the logs, then stop the process with `Ctrl+C`)*
-
-**Bash / macOS / Linux:**
-```bash
-mvn spring-boot:run
-```
-*(Wait until `Started OrdersApplication` appears in the logs, then stop the process with `Ctrl+C`)*
-
-### 4. Run seed.sql
-Now that tables exist, seed the initial inventory:
-
-**PowerShell (Windows):**
-```powershell
-$env:MYSQL_PWD=$env:DB_PASSWORD; mysql -u $env:DB_USERNAME order_db -e "source seed.sql;"
-```
-
-**Bash / macOS / Linux:**
-```bash
-mysql -u "$DB_USERNAME" -p order_db < seed.sql
-```
-
-### 5. Start and Use the API
+### 3. Run the Application
 Launch the application:
 
 **PowerShell / Bash:**
@@ -87,6 +59,9 @@ java -jar target/orders-0.0.1-SNAPSHOT.jar
 ```
 
 The REST API will be available on `http://localhost:8080`.
+
+> [!NOTE]
+> Database tables are created by Hibernate on startup (`spring.jpa.hibernate.ddl-auto=update`), followed by automatic execution of `src/main/resources/data.sql` (`INSERT IGNORE`) to populate default products. Note that auto-seeding is for demo use only.
 
 ---
 
@@ -193,20 +168,35 @@ All non-2xx responses are mapped into a standardized `ApiError` envelope by `Glo
 ---
 
 ## Concurrency
-### Optimistic Locking
-Optimistic locking is implemented via JPA `@Version private long version;` on both `Product` and `Order` entities:
-- **On `Product`**: Prevented overselling in the tested scenario. When multiple concurrent orders attempt to purchase the same inventory item, Hibernate includes `WHERE id = ? AND version = ?` on update. If another transaction commits an update first, zero rows match and Spring throws `ObjectOptimisticLockingFailureException`.
-- **On `Order`**: Protects against concurrent PATCH-vs-PATCH status updates and DELETE-vs-DELETE cancellation races, both of which were tested.
+### Concurrency Control & Locking
+- **On `Product`**: Decrements and increments stock using atomic conditional database queries (`UPDATE Product p SET p.stock = p.stock - :qty, p.version = p.version + 1 WHERE p.id = :id AND p.stock >= :qty`). The database checks available stock and applies the decrement in a single statement, eliminating the read-then-write gap; no false 409s occurred in the tested scenarios under concurrent orders for available stock. The Product entity is no longer modified through Hibernate, so its @Version is not checked; the version column is only incremented inside the bulk UPDATEs.
+- **On `Order`**: `@Version` protects against concurrent PATCH-vs-PATCH status updates and DELETE-vs-DELETE cancellation races, both of which were tested.
+- **Deadlock Prevention**: In order placement and cancellation, order items are sorted deterministically by `productId` before database queries and updates, so transactions take product row locks in a consistent order, which reduces deadlock risk. Opposing multi-item orders were not load-tested.
 
-### Concurrency Verification (race.ps1)
-- **Baseline (without locking)**: 3 rounds of 10 simultaneous orders against Product 3 (stock 1) resulted in **10 successful orders per round** (30 orders placed across 3 units of stock), illustrating lost updates and overselling.
-- **Place Race (with optimistic locking)**: 5 rounds of 10 simultaneous orders against Product 3 (stock 1) resulted in **exactly 1 success (`201 Created`) and 9 conflicts (`409 Conflict`) per round**. Stock ended at `0` every round, and total items sold equaled exactly 5 across 5 rounds.
-- **Cancel Race**: 10 simultaneous `DELETE /orders/{id}` requests on a placed order resulted in **exactly 1 success (`204 No Content`) and 9 conflicts (`409 Conflict`)**. Stock was restored by exactly the ordered quantity once, and the order was removed.
-- **Patch Race**: 10 simultaneous `PATCH /orders/{id}/status` requests resulted in **exactly 1 success (`200 OK`) and 9 conflicts (`409 Conflict`)**. Order status updated to `SHIPPED` with incremented entity version.
+### Concurrency Verification
+- **Scripts**: `scripts/race.ps1` is Windows-only (PowerShell 5.1+ / .NET HttpClient). `scripts/race.sh` is for Linux/macOS (bash + curl, background jobs; tested on Windows with Git Bash).
+- **Baseline (Without Locking)**: 3 rounds of 10 simultaneous orders against Product 3 (stock 1) resulted in **10 successful orders per round** (30 orders placed across 3 units of stock), illustrating lost updates and overselling.
+- **Before: Pure Optimistic Locking (@Version on Product)**:
+  - When Product 1 stock was reset to 100 before each round:
+    - Round 1 (10 concurrent requests): 1 x `201 Created`, 9 x `409 Conflict` (ending stock = 99, 1 order item).
+    - Round 2 (10 concurrent requests): 1 x `201 Created`, 9 x `409 Conflict` (ending stock = 99, 2 order items).
+    - Round 3 (10 concurrent requests): 1 x `201 Created`, 9 x `409 Conflict` (ending stock = 99, 3 order items).
+    - Round 4 (20 concurrent requests): 2 x `201 Created`, 18 x `409 Conflict` (ending stock = 98, 5 order items).
+    *(Demonstrating false 409 conflicts under high concurrency despite sufficient stock due to the read-then-write version check gap).*
+- **After: Atomic Conditional UPDATE**:
+  - When Product 1 stock was reset to 100 before each round:
+    - Round 1 (10 concurrent requests): **10 x `201 Created`, 0 x `409 Conflict`** (ending stock = 90, 10 order items).
+    - Round 2 (10 concurrent requests): **10 x `201 Created`, 0 x `409 Conflict`** (ending stock = 90, 20 order items).
+    - Round 3 (10 concurrent requests): **10 x `201 Created`, 0 x `409 Conflict`** (ending stock = 90, 30 order items).
+    - Round 4 (20 concurrent requests): **20 x `201 Created`, 0 x `409 Conflict`** (ending stock = 80, 50 order items).
+    *(All requests succeed with zero false 409s when stock is sufficient).*
+  - **Stock Exhaustion / Scarcity (Product 3, stock 1)**: 5 rounds of 10 simultaneous orders against Product 3 (stock 1, reset each round) resulted in **exactly 1 success (`201 Created`) and 9 conflicts (`409 Conflict`) per round**. Stock ended at `0` every round (never negative), total units sold equaled 5 across the 5 rounds, and all 409 responses returned `"Insufficient stock for product id 3 (USB-C Charging Cable). Requested: 1"`.
+  - **Cancel Race**: 10 simultaneous `DELETE /orders/{id}` requests on a placed order resulted in **exactly 1 success (`204 No Content`) and 9 conflicts (`409 Conflict`)**. Stock was restored by exactly the ordered quantity once, and the order was removed.
+  - **Patch Race**: 10 simultaneous `PATCH /orders/{id}/status` requests resulted in **exactly 1 success (`200 OK`) and 9 conflicts (`409 Conflict`)**. Order status updated to `SHIPPED` with incremented entity version.
 
 ### Limitations
-- **No Automatic Retry**: If an optimistic lock conflict occurs, the request fails immediately with `409 Conflict` (`"The request conflicted with another update to the same data. Please retry."`). Retrying is the client's responsibility.
-- **Deadlock and Lock Contention**: While optimistic locking detects concurrent modifications at commit/flush time, underlying MySQL InnoDB row-level locks can still experience deadlocks or lock wait timeouts under intense contention. These are captured by Spring's `ConcurrencyFailureException` hierarchy and similarly return `409 Conflict` (mapped by exception hierarchy, not tested).
+- **True Stock Depletion**: In the tested scenarios, when stock is truly exhausted, orders fail immediately with `409 Conflict` (`InsufficientStockException`). Under sufficient inventory, atomic conditional updates allowed concurrent orders to complete successfully without false 409s.
+- **Deadlock and Lock Contention**: While deterministic product sorting reduces the risk of lock-ordering deadlocks, underlying MySQL InnoDB row-level locks can still experience deadlocks or lock wait timeouts under extreme contention. These are captured by Spring's `ConcurrencyFailureException` hierarchy and similarly return `409 Conflict` (mapped by exception hierarchy, not tested).
 
 ---
 
@@ -243,5 +233,6 @@ mvn test
 - **List Endpoint Summaries**: `GET /orders` returns lightweight order summaries (`OrderSummaryResponse`) excluding line items to avoid large payload transfer on paginated listings.
 - **Hibernate DDL Auto**: `spring.jpa.hibernate.ddl-auto=update` is configured for development schema generation. Production deployments should disable ddl-auto and utilize migration tools such as Flyway or Liquibase.
 - **Authentication**: No authentication or authorization is configured.
-- **No Product Endpoints**: Products are pre-seeded directly into MySQL via `seed.sql`.
+- **No Product Endpoints**: Products are auto-seeded on startup via data.sql (demo use only).
 - **Idempotency on Status PATCH**: Attempting to transition an order to its current status (e.g. `SHIPPED` → `SHIPPED`) is rejected with `409 Conflict` per transition state rules.
+- **Order Items Response Sorting**: Order items in responses are sorted by product id, not request order.
