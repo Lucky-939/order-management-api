@@ -1,0 +1,9 @@
+{
+  "customerName": "Test Customer",
+  "items": [
+    {
+      "productId": 99999,
+      "quantity": 1
+    }
+  ]
+}

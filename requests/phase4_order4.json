@@ -1,0 +1,13 @@
+{
+  "customerName": "Diana",
+  "items": [
+    {
+      "productId": 1,
+      "quantity": 2
+    },
+    {
+      "productId": 4,
+      "quantity": 1
+    }
+  ]
+}

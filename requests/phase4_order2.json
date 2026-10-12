@@ -1,0 +1,9 @@
+{
+  "customerName": "Bob",
+  "items": [
+    {
+      "productId": 2,
+      "quantity": 1
+    }
+  ]
+}

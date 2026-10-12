@@ -1,0 +1,13 @@
+{
+  "customerName": "Bob Jones",
+  "items": [
+    {
+      "productId": 1,
+      "quantity": 2
+    },
+    {
+      "productId": 3,
+      "quantity": 5
+    }
+  ]
+}
