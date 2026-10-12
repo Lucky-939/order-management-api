@@ -224,7 +224,7 @@ mvn test
 
 ### What Mockito Tests Do NOT Prove
 - **Database Rollbacks**: Mockito unit tests mock repositories and verify that `orderRepository.save()` was never invoked; they cannot verify that MySQL actually rolled back earlier flushed `UPDATE products` statements upon transaction abort. Real transaction rollback was verified against live MySQL in the manual rollback check.
-- **Optimistic Locking**: Mockito stubs do not execute Hibernate version increment checks or simulate database race conditions; optimistic locking and multi-threaded concurrency protections were verified using real concurrent HTTP requests via the concurrent-request script (scripts/race.ps1).
+- **Concurrency Protections**: Mockito stubs do not execute actual atomic database UPDATEs or simulate multi-threaded database race conditions; atomic conditional updates for inventory and JPA optimistic locking on orders were verified using real concurrent HTTP requests via the race scripts (`scripts/race.ps1` and `scripts/race.sh`).
 
 ---
 
