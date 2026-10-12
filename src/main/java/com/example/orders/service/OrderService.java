@@ -24,7 +24,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 // Service component handling order placement, retrieval, and pagination workflows
@@ -51,26 +54,30 @@ public class OrderService {
             }
         }
 
+        // Every order locks products in the same id order, which avoids deadlocks
+        List<OrderItemRequest> sortedItems = new ArrayList<>(request.getItems());
+        sortedItems.sort(new Comparator<OrderItemRequest>() {
+            @Override
+            public int compare(OrderItemRequest a, OrderItemRequest b) {
+                return a.getProductId().compareTo(b.getProductId());
+            }
+        });
+
         // Step b: Create the Order with customerName, PLACED status, and temporary total amount of ZERO
         Order order = new Order(request.getCustomerName(), OrderStatus.PLACED, BigDecimal.ZERO);
 
-        // Step c: Loop over the items IN ORDER, resolving products, validating/decrementing stock, and building line items
+        // Step c: Loop over sorted items, resolving products, validating/decrementing stock, and building line items
         BigDecimal runningTotal = BigDecimal.ZERO;
-        for (OrderItemRequest itemReq : request.getItems()) {
+        for (OrderItemRequest itemReq : sortedItems) {
             Product product = productRepository.findById(itemReq.getProductId())
                     .orElseThrow(() -> new ResourceNotFoundException("Product not found with id: " + itemReq.getProductId()));
 
-            if (product.getStock() < itemReq.getQuantity()) {
+            // The product entity is only read, never modified, so dirty checking writes nothing for it
+            int updated = productRepository.decreaseStock(itemReq.getProductId(), itemReq.getQuantity());
+            if (updated == 0) {
                 throw new InsufficientStockException("Insufficient stock for product id " + product.getId()
-                        + " (" + product.getName() + "). Available: " + product.getStock()
-                        + ", requested: " + itemReq.getQuantity());
+                        + " (" + product.getName() + "). Requested: " + itemReq.getQuantity());
             }
-
-            // Decrement stock immediately so subsequent validation failures test transaction rollback of earlier decrements
-            product.setStock(product.getStock() - itemReq.getQuantity());
-
-            // flush now so the UPDATE is sent to MySQL inside the transaction; this makes a later failure exercise a real rollback instead of discarding an unsent change.
-            productRepository.saveAndFlush(product);
 
             // Create OrderItem taking an immutable price snapshot from the product at purchase time
             OrderItem orderItem = new OrderItem(order, product, itemReq.getQuantity(), product.getPrice());
@@ -136,10 +143,18 @@ public class OrderService {
             throw new OrderNotCancellableException("Only PLACED orders can be cancelled; current status: " + order.getStatus());
         }
 
-        // Restore product stock using an explicit loop without streams
-        for (OrderItem item : order.getItems()) {
-            Product product = item.getProduct();
-            product.setStock(product.getStock() + item.getQuantity());
+        // Every cancel locks products in the same id order, which avoids deadlocks
+        List<OrderItem> sortedItems = new ArrayList<>(order.getItems());
+        sortedItems.sort(new Comparator<OrderItem>() {
+            @Override
+            public int compare(OrderItem a, OrderItem b) {
+                return a.getProduct().getId().compareTo(b.getProduct().getId());
+            }
+        });
+
+        // Restore product stock using an atomic database update statement
+        for (OrderItem item : sortedItems) {
+            productRepository.increaseStock(item.getProduct().getId(), item.getQuantity());
         }
         // the items are removed by cascade = ALL / orphanRemoval, so there is no OrderItemRepository.
         orderRepository.delete(order);

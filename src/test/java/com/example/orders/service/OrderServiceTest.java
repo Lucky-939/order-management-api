@@ -28,6 +28,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -61,7 +62,9 @@ class OrderServiceTest {
         ));
 
         when(productRepository.findById(1L)).thenReturn(Optional.of(keyboard));
+        when(productRepository.decreaseStock(1L, 2)).thenReturn(1);
         when(productRepository.findById(2L)).thenReturn(Optional.of(mouse));
+        when(productRepository.decreaseStock(2L, 1)).thenReturn(1);
         // Return argument so saved order maintains in-memory references
         when(orderRepository.save(any(Order.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -69,10 +72,8 @@ class OrderServiceTest {
         OrderResponse response = orderService.placeOrder(request);
 
         // Assert
-        assertEquals(8, keyboard.getStock());
-        assertEquals(4, mouse.getStock());
-        verify(productRepository).saveAndFlush(keyboard);
-        verify(productRepository).saveAndFlush(mouse);
+        verify(productRepository).decreaseStock(1L, 2);
+        verify(productRepository).decreaseStock(2L, 1);
         assertEquals(2, response.getItems().size());
         assertEquals(0, new BigDecimal("89.99").compareTo(response.getItems().get(0).getUnitPrice()));
         assertEquals(0, new BigDecimal("29.50").compareTo(response.getItems().get(1).getUnitPrice()));
@@ -96,11 +97,15 @@ class OrderServiceTest {
         ));
 
         when(productRepository.findById(1L)).thenReturn(Optional.of(keyboard));
+        when(productRepository.decreaseStock(1L, 2)).thenReturn(1);
         when(productRepository.findById(3L)).thenReturn(Optional.of(cable));
+        when(productRepository.decreaseStock(3L, 5)).thenReturn(0);
 
         // Act & Assert
         assertThrows(InsufficientStockException.class, () -> orderService.placeOrder(request));
 
+        verify(productRepository).decreaseStock(1L, 2);
+        verify(productRepository).decreaseStock(3L, 5);
         // This proves the service stops and never saves the order; the database rollback itself is verified against real MySQL, and a Mockito test cannot prove it.
         verify(orderRepository, never()).save(any());
     }
@@ -203,8 +208,8 @@ class OrderServiceTest {
         orderService.cancelOrder(1L);
 
         // Assert
-        assertEquals(9, p1.getStock());
-        assertEquals(14, p2.getStock());
+        verify(productRepository).increaseStock(1L, 2);
+        verify(productRepository).increaseStock(2L, 1);
         verify(orderRepository).delete(order);
     }
 
@@ -225,7 +230,7 @@ class OrderServiceTest {
 
         // Act & Assert
         assertThrows(OrderNotCancellableException.class, () -> orderService.cancelOrder(1L));
-        assertEquals(7, p1.getStock());
+        verify(productRepository, never()).increaseStock(any(), anyInt());
         verify(orderRepository, never()).delete(any());
     }
 
